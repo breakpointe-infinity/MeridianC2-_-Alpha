@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --animate-svg-pulse: svg-pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-dash: dash 1s linear infinite;
+
+  @keyframes svg-pulse {
+    0%, 100% {
+      opacity: 1;
+      stroke-width: 2.5;
+    }
+    50% {
+      opacity: .5;
+      stroke-width: 3.5;
+      stroke: #54FFA6;
+    }
+  }
+
+  @keyframes dash {
+    to {
+      stroke-dashoffset: -14;
+    }
+  }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent; 
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272A; 
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3F3F46; 
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
