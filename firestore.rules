@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default-Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Security Helper Primitives
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    function isSignedIn() { 
+      return request.auth != null; 
+    }
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // 3. Schema & Bound Validation Helpers
+    function isValidPipeline(data) {
+      return data.userId is string 
+        && data.userId.size() <= 128
+        && data.name is string 
+        && data.name.size() <= 100
+        && data.nodes is list
+        && data.nodes.size() <= 100
+        && data.connections is list
+        && data.connections.size() <= 200;
+    }
+
+    // 4. Pipelines Resource Match Block
+    match /pipelines/{pipelineId} {
+      allow get: if isSignedIn() && isOwner(resource.data.userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      
+      allow create: if isSignedIn() 
+        && isValidId(pipelineId)
+        && request.resource.data.userId == request.auth.uid
+        && isValidPipeline(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+        
+      allow update: if isSignedIn()
+        && isValidId(pipelineId)
+        && isOwner(resource.data.userId)
+        && request.resource.data.userId == resource.data.userId
+        && isValidPipeline(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+        
+      allow delete: if isSignedIn() && isOwner(resource.data.userId);
+    }
+  }
+}

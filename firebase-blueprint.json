@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "Pipeline": {
+      "title": "Pipeline",
+      "description": "A saved agent pipeline configuration layout.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the user who owns this pipeline."
+        },
+        "name": {
+          "type": "string",
+          "description": "The display name of the pipeline."
+        },
+        "nodes": {
+          "type": "array",
+          "description": "List of pipeline nodes inside the workflow."
+        },
+        "connections": {
+          "type": "array",
+          "description": "List of connections between workflow nodes."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp."
+        }
+      },
+      "required": ["userId", "name", "nodes", "connections", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/pipelines/{pipelineId}": {
+      "schema": "Pipeline",
+      "description": "Stores user-designed agent pipeline workflows."
+    }
+  }
+}

@@ -2,6 +2,16 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { getImpureNodeId, getImpureCoordinates } from "@/lib/utils";
+
+// Firebase & Google Drive Picker Integrations
+import { initAuth, googleSignIn, logout } from "@/lib/firebase";
+import { 
+  savePipelineToCloud, 
+  loadUserPipelines, 
+  deletePipelineFromCloud, 
+  validateFirestoreConnection 
+} from "@/lib/firestore-helper";
+import { loadGooglePickerScripts, launchGooglePicker } from "@/lib/google-picker";
 import {
   ResponsiveContainer,
   LineChart,
@@ -874,6 +884,214 @@ export default function MeridianRuntimeOSConsole() {
     "[DIRECTIVE] Target telemetry synchronized on OPERATION_842. Awaiting operator input directives.",
   ]);
   const [terminalInput, setTerminalInput] = useState("");
+
+  // -------------------- GOOGLE DRIVE & FIREBASE CLOUD INTEGRATIONS --------------------
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [userAccessToken, setUserAccessToken] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authProgress, setAuthProgress] = useState(false);
+  
+  // Lists and loading states for Firestore
+  const [cloudPipelines, setCloudPipelines] = useState<any[]>([]);
+  const [selectedCloudPipelineId, setSelectedCloudPipelineId] = useState<string>("");
+  const [cloudPipelineNameInput, setCloudPipelineNameInput] = useState<string>("TACTICAL_CONSTELLATION_ALPHA");
+  const [saveCloudLoading, setSaveCloudLoading] = useState(false);
+  const [loadCloudLoading, setLoadCloudLoading] = useState(false);
+  const [deleteCloudLoading, setDeleteCloudLoading] = useState(false);
+  
+  // Google Picker files state
+  const [pickedDriveFile, setPickedDriveFile] = useState<any>(null);
+  const [isDrivePickerLoading, setIsDrivePickerLoading] = useState(false);
+
+  // Synchronize with Firebase Auth and GAPI scripts on mount
+  useEffect(() => {
+    // 1. Initialise and test connection
+    validateFirestoreConnection()
+      .then(ok => {
+        if (ok) {
+          setTerminalLogs(prev => [...prev, "[FIRESTORE] Live cloud datastore handshake: COMPLETED."]);
+        }
+      })
+      .catch(err => console.error("Firestore handshake error", err));
+
+    // 2. Load Google Picker API scripts
+    loadGooglePickerScripts()
+      .then(() => {
+        setTerminalLogs(prev => [...prev, "[GAPI_LOADER] Google GAPI & Picker components loaded in browser."]);
+      })
+      .catch(err => console.error("GAPI load error", err));
+
+    // 3. Bind Firebase Auth state listener
+    const unsubscribe = initAuth(
+      async (user, oauthToken) => {
+        setCurrentUser(user);
+        setUserAccessToken(oauthToken);
+        setAuthReady(true);
+        setTerminalLogs(prev => [
+          ...prev, 
+          `[AUTH] Google Sign-In verified for: ${user.email}. OAuth key buffered in-memory.`
+        ]);
+
+        try {
+          const list = await loadUserPipelines(user.uid);
+          setCloudPipelines(list);
+          if (list.length > 0) {
+            setSelectedCloudPipelineId(list[0].id);
+            setCloudPipelineNameInput(list[0].name);
+          }
+        } catch (err) {
+          console.error("Failed to load pipelines from Firestore", err);
+        }
+      },
+      () => {
+        setCurrentUser(null);
+        setUserAccessToken(null);
+        setAuthReady(true);
+        setCloudPipelines([]);
+        setSelectedCloudPipelineId("");
+      }
+    );
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
+  const handleSavePipelineToCloud = async () => {
+    if (!currentUser) {
+      playSfx("warning");
+      return;
+    }
+    setSaveCloudLoading(true);
+    playSfx("click");
+    
+    // Create or locate a pipeline ID
+    const safeId = selectedCloudPipelineId || `pipe-${Date.now()}`;
+    const cleanName = cloudPipelineNameInput.trim() || `TACTICAL_FLOW_${Date.now()}`;
+    
+    setTerminalLogs(prev => [...prev, `[FIRESTORE] Dispatching pipeline save transaction: [${cleanName}]...`]);
+
+    try {
+      const saved = await savePipelineToCloud({
+        id: safeId,
+        userId: currentUser.uid,
+        name: cleanName,
+        nodes: pipelineNodes,
+        connections: pipelineConnections,
+        createdAt: cloudPipelines.find(p => p.id === safeId)?.createdAt || null
+      });
+      
+      setTerminalLogs(prev => [...prev, `[SUCCESS] Pipeline saved securely to cloud collection. Document ID: ${safeId}`]);
+      playSfx("success");
+
+      // Reload pipelines
+      const renewed = await loadUserPipelines(currentUser.uid);
+      setCloudPipelines(renewed);
+      setSelectedCloudPipelineId(safeId);
+    } catch (err: any) {
+      playSfx("warning");
+      setTerminalLogs(prev => [...prev, `[ERROR] Failed to save cloud document: ${err.message || err}`]);
+    } finally {
+      setSaveCloudLoading(false);
+    }
+  };
+
+  const handleLoadPipelineFromCloud = async () => {
+    if (!selectedCloudPipelineId) {
+      playSfx("warning");
+      return;
+    }
+    const match = cloudPipelines.find(p => p.id === selectedCloudPipelineId);
+    if (!match) {
+      playSfx("warning");
+      return;
+    }
+
+    setLoadCloudLoading(true);
+    playSfx("click");
+    setTerminalLogs(prev => [...prev, `[FIRESTORE] Recalling constellation matrix mapping: [${match.name}]...`]);
+
+    try {
+      if (match.nodes && Array.isArray(match.nodes)) {
+        setPipelineNodes(match.nodes);
+      }
+      if (match.connections && Array.isArray(match.connections)) {
+        setPipelineConnections(match.connections);
+      }
+      setCloudPipelineNameInput(match.name);
+      setTerminalLogs(prev => [...prev, `[SUCCESS] Constellation model reconstructed. Nodes count: ${match.nodes.length}`]);
+      playSfx("success");
+    } catch (err: any) {
+      playSfx("warning");
+      setTerminalLogs(prev => [...prev, `[ERROR] Load exception encountered: ${err.message || err}`]);
+    } finally {
+      setLoadCloudLoading(false);
+    }
+  };
+
+  const handleDeletePipelineFromCloud = async () => {
+    if (!selectedCloudPipelineId) {
+      playSfx("warning");
+      return;
+    }
+    const match = cloudPipelines.find(p => p.id === selectedCloudPipelineId);
+    if (!match) return;
+
+    const confirmed = window.confirm(`PROMPT_SECURE_DELETE: Are you sure you want to permanently delete the pipeline configuration "${match.name}" from your secure cloud storage?`);
+    if (!confirmed) return;
+
+    setDeleteCloudLoading(true);
+    playSfx("click");
+    setTerminalLogs(prev => [...prev, `[FIRESTORE] Purging pipeline record document: [${match.name}]...`]);
+
+    try {
+      await deletePipelineFromCloud(selectedCloudPipelineId);
+      setTerminalLogs(prev => [...prev, `[SUCCESS] Cloud layout record decommissioned.`]);
+      playSfx("success");
+
+      const renewed = await loadUserPipelines(currentUser.uid);
+      setCloudPipelines(renewed);
+      if (renewed.length > 0) {
+        setSelectedCloudPipelineId(renewed[0].id);
+        setCloudPipelineNameInput(renewed[0].name);
+      } else {
+        setSelectedCloudPipelineId("");
+        setCloudPipelineNameInput("MY_NEW_CONSTELLATION");
+      }
+    } catch (err: any) {
+      playSfx("warning");
+      setTerminalLogs(prev => [...prev, `[ERROR] Delete transaction aborted: ${err.message || err}`]);
+    } finally {
+      setDeleteCloudLoading(false);
+    }
+  };
+
+  const handleLaunchDrivePicker = () => {
+    if (!userAccessToken) {
+      playSfx("warning");
+      setTerminalLogs(prev => [...prev, "[WARNING] Access token expired or uninitialized. Trigger sign-in portal."]);
+      return;
+    }
+    setIsDrivePickerLoading(true);
+    playSfx("click");
+    setTerminalLogs(prev => [...prev, "[GAPI] Opening secure Google Drive File Picker portal..."]);
+
+    try {
+      launchGooglePicker(userAccessToken, (file) => {
+        setPickedDriveFile(file);
+        setTerminalLogs(prev => [
+          ...prev, 
+          `[GOOGLE_DRIVE] Selected object: "${file.name}"`, 
+          `[PORT_BINDING] File stream injected as workspace telemetry parameter. URL: ${file.url}`
+        ]);
+        playSfx("success");
+      });
+    } catch (err: any) {
+      setTerminalLogs(prev => [...prev, `[ERROR] Picker initialization failed: ${err.message || err}`]);
+    } finally {
+      setIsDrivePickerLoading(false);
+    }
+  };
 
   // Planning perspective objectives
   const [objectives, setObjectives] = useState([
@@ -3749,6 +3967,179 @@ export default function MeridianRuntimeOSConsole() {
                             [ FACTORY DEFAULTS ]
                           </button>
                         </div>
+                      </div>
+
+                      {/* Firebase Auth & Firestore Cloud Saving Panel */}
+                      <div className="border border-zinc-900 p-3 bg-zinc-950/60 space-y-3">
+                        <div className="text-[9px] font-bold text-zinc-405 uppercase tracking-widest border-b border-zinc-900 pb-1.5 flex justify-between items-center">
+                          <span>Firestore Cloud Storage</span>
+                          <span className="text-[8px] px-1 bg-[#10B981]/10 text-[#54FFA6] font-mono tracking-tighter">SECURE</span>
+                        </div>
+
+                        {!currentUser ? (
+                          <div className="space-y-2.5 text-center py-2">
+                            <p className="text-[8.5px] text-zinc-550 leading-relaxed text-left">
+                              Authorise your terminal console to persist layouts dynamically on Cloud Firestore.
+                            </p>
+                            <button
+                              onClick={async () => {
+                                playSfx("click");
+                                setAuthProgress(true);
+                                try {
+                                  const res = await googleSignIn();
+                                  if (res) {
+                                    playSfx("success");
+                                  }
+                                } catch (e) {
+                                  playSfx("warning");
+                                } finally {
+                                  setAuthProgress(false);
+                                }
+                              }}
+                              disabled={authProgress}
+                              className="w-full py-2 bg-white text-black hover:bg-zinc-200 font-bold text-[9px] uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                            >
+                              <svg className="w-3 h-3" viewBox="0 0 24 24">
+                                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                                <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                                <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22c-.87-2.6-2.87-4.53-5.01-4.53z" />
+                                <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                              </svg>
+                              {authProgress ? "connecting..." : "Sign In with Google"}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="space-y-3 font-mono text-[9.5px]">
+                            {/* User Header */}
+                            <div className="bg-black/40 border border-zinc-900 p-1.5 flex justify-between items-center">
+                              <div className="flex items-center gap-1.5 truncate max-w-[130px]">
+                                <span className="w-1.5 h-1.5 bg-[#54FFA6] rounded-full animate-pulse" />
+                                <div className="flex flex-col truncate">
+                                  <span className="text-zinc-200 truncate pr-1">{currentUser.displayName || "Operator"}</span>
+                                  <span className="text-[7.5px] text-zinc-550 truncate">{currentUser.email}</span>
+                                </div>
+                              </div>
+                              <button
+                                onClick={async () => {
+                                  playSfx("click");
+                                  await logout();
+                                  playSfx("success");
+                                }}
+                                className="px-1.5 py-0.5 border border-zinc-900 hover:border-red-500 hover:text-red-400 text-zinc-550 text-[8px] cursor-pointer"
+                              >
+                                QUIT
+                              </button>
+                            </div>
+
+                            {/* Cloud Layout Manager */}
+                            <div className="space-y-1.5">
+                              <span className="text-zinc-550 text-[8px] uppercase">Active Cloud Configurations:</span>
+                              <div className="flex gap-1">
+                                <select
+                                  value={selectedCloudPipelineId}
+                                  onChange={(e) => {
+                                    setSelectedCloudPipelineId(e.target.value);
+                                    const found = cloudPipelines.find(p => p.id === e.target.value);
+                                    if (found) {
+                                      setCloudPipelineNameInput(found.name);
+                                    }
+                                  }}
+                                  className="flex-1 bg-black border border-zinc-800 px-1 py-1 text-zinc-300 text-[9px] focus:outline-none"
+                                >
+                                  <option value="">-- NEW FILE CONFIG --</option>
+                                  {cloudPipelines.map(p => (
+                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                  ))}
+                                </select>
+                                {selectedCloudPipelineId && (
+                                  <button
+                                    onClick={handleDeletePipelineFromCloud}
+                                    title="Delete selected pipeline from Firestore"
+                                    className="p-1 px-1.5 bg-zinc-950 border border-zinc-900 hover:border-red-700 hover:text-red-400 text-zinc-400 cursor-pointer text-[10px]"
+                                  >
+                                    ×
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Save Input & Actions */}
+                            <div className="space-y-1.5">
+                              <span className="text-zinc-550 text-[8.5px] uppercase">Save Name Identifier:</span>
+                              <input
+                                type="text"
+                                value={cloudPipelineNameInput}
+                                onChange={(e) => setCloudPipelineNameInput(e.target.value.toUpperCase())}
+                                className="w-full bg-black border border-zinc-800 px-2 py-0.5 text-zinc-200 text-[10px] focus:outline-none focus:border-[#10B981]"
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-1.5 mt-1">
+                              <button
+                                onClick={handleSavePipelineToCloud}
+                                disabled={saveCloudLoading}
+                                className="py-1 bg-[#10B981]/15 hover:bg-[#10B981]/25 border border-[#10B981]/50 text-[#54FFA6] font-bold text-[8px] uppercase tracking-wider cursor-pointer"
+                              >
+                                {saveCloudLoading ? "Saving..." : "Save to Cloud"}
+                              </button>
+                              <button
+                                onClick={handleLoadPipelineFromCloud}
+                                disabled={!selectedCloudPipelineId || loadCloudLoading}
+                                className="py-1 bg-transparent hover:bg-zinc-900 border border-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 font-bold text-[8px] uppercase tracking-wider cursor-pointer"
+                              >
+                                {loadCloudLoading ? "Loading..." : "Load From Cloud"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Google Drive Picker & File Import Panel */}
+                      <div className="border border-zinc-900 p-3 bg-zinc-950/60 space-y-3">
+                        <div className="text-[9px] font-bold text-zinc-405 uppercase tracking-widest border-b border-zinc-900 pb-1.5 flex justify-between items-center">
+                          <span>Google Drive Import</span>
+                          <span className="text-[8px] px-1 bg-blue-500/15 text-blue-400 font-mono tracking-tighter">DRIVE_API</span>
+                        </div>
+
+                        {!userAccessToken ? (
+                          <p className="text-[8.5px] text-zinc-550 leading-relaxed font-mono">
+                            Authorize with Google Account above to load workspace assets and select drive paths.
+                          </p>
+                        ) : (
+                          <div className="space-y-2.5 font-mono text-[9px]">
+                            <button
+                              onClick={handleLaunchDrivePicker}
+                              disabled={isDrivePickerLoading}
+                              className="w-full py-1.5 bg-blue-500/10 border border-blue-500/40 hover:bg-blue-500/15 text-blue-350 font-bold text-[9px] uppercase tracking-wider cursor-pointer"
+                            >
+                              📁 Launch Google Picker
+                            </button>
+
+                            {pickedDriveFile ? (
+                              <div className="bg-black/50 p-2 border border-zinc-900 space-y-1.5">
+                                <div className="text-[7.5px] text-zinc-550 uppercase">Imported Asset:</div>
+                                <div className="text-zinc-200 font-bold truncate" title={pickedDriveFile.name}>
+                                  {pickedDriveFile.name}
+                                </div>
+                                <div className="text-[7.5px] text-zinc-450 truncate">
+                                  ID: {pickedDriveFile.id}
+                                </div>
+                                <a
+                                  href={pickedDriveFile.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-blue-400 hover:underline text-[8px] block"
+                                >
+                                  Open In Workspace 🔗
+                                </a>
+                              </div>
+                            ) : (
+                              <div className="text-[8px] text-zinc-550 italic text-center py-1">
+                                No active file context loaded. Select from Drive to ingest.
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       {/* Add Node Panel */}
